@@ -1,5 +1,5 @@
 /**
- * UVIC FORMULA HYBRID 2017
+ * UVIC FORMULA HYBRID 2017-2018
  * 
  * This is temporary code to control the throttle body while the mechanical drive train
  * is running on its own. It reads the position of a potentiometer (which simulates the
@@ -24,12 +24,16 @@
 #define ENA_OUT 4
 #define ENB_OUT 6
 
-/* PWM values for driving the motor */
-#define FULLY_CLOSED 0
-#define FULLY_OPEN 255
-#define FIXED 50 // Not enough to move it either way
-#define PUSH_OPEN 100
-#define PUSH_CLOSED 1
+/* PID Setup Parameters
+ * 4, 30, 0.01 works, but finer calibration could be done. */
+double Kp = 4;
+double Ki = 30;
+double Kd = 0.01;
+
+/* PID global variables (across iterations) */
+double integral = 0;
+int oldtime = 0;
+double error = 0;
 
 void setup() {
   // Serial stream for logging values
@@ -47,7 +51,7 @@ void setup() {
   pinMode(ENB_OUT, OUTPUT);
 
   // Set motor to spin in direction A
-  digitalWrite(INA_OUT, LOW);
+  digitalWrite(INA_OUT, HIGH);
   digitalWrite(INB_OUT, LOW);
 
   // Enable all motor bridges
@@ -68,6 +72,11 @@ void loop() {
 
   // Move the motor
   analogWrite(PWM_OUT, pwm_val);
+
+  // Limit the frequency of this loop.
+  // Letting it run too fast results in too small dt values for integral
+  // and derivative calculations, which results in high error.
+  delay(10);
 }
 
 /*
@@ -90,7 +99,7 @@ double read_pot() {
  * and scale it to be from 0 - 100.
  */
 double read_tps() {
-  double val = (analogRead(TPS_IN) - 265.0) / 5.44;
+  double val = (analogRead(TPS_IN) - 280.0) / 5.85;
 
   if (val < 0)
     return 0;
@@ -102,28 +111,41 @@ double read_tps() {
 
 /*
  * Given the position we want the throttle body to be in and the value
- * it's currently in, calculates the PWM value that will drive the motor
- * toward the desired position. Parameters are values from 0 (fully closed)
- * to 100 (wide open).
+ * it's currently in, uses PID to calculate the PWM value that will drive
+ * the motor toward the desired position. Parameters are values from 0
+ * (fully closed) to 100 (wide open).
  */
-double calculate_pwm_val(double throttle_request, double throttle_pos) {
+double calculate_pwm_val(double throttle_request, double tps_feedback) {
 
-  // How much the motor needs to be moved to achive throttle_request
-  double diff = throttle_request - throttle_pos;
+  // Save the old error for derivative calculation
+  double olderror = error;
+  
+  // Determine the error between desired and current
+  error = throttle_request - tps_feedback;
 
-  // Determine how much motor speed is needed for the adjustment
-  if (throttle_request < 5) {
-    // Go straight to closed as fast as possible
-    return FULLY_CLOSED;
-  } else if (throttle_request > 95) {
-    // Go straight to open as fast as possible
-    return FULLY_OPEN;
-  } else if (abs(diff) > 5) {
-    // Adjustment is needed, push the motor partially
-    return (diff > 0) ? PUSH_OPEN : PUSH_CLOSED;
-  } else {
-    // Keep it where it is
-    return FIXED;
-  }
+  // Record the current time to calculate the time derivative
+  int runtime = millis();
+
+  // Find the current rate of change of error w.r.t. time
+  double dt = (runtime - oldtime) / 1000.0;
+  double derivative = (error - olderror) / dt;
+
+  // Set the oldtime to be the new runtime
+  oldtime = runtime;
+
+  // Add the error to the integral of the errors
+  integral += error*dt;
+
+  // Calculate the pwm request based on PID coeffecients
+  double pwm_request = error*Kp + integral*Ki + derivative*Kd;
+
+  // Minimum of request is 0
+  if (pwm_request < 0) pwm_request = 0;
+
+  // Override request if throttle is requested closed or wide open
+  if (throttle_request < 0.5) pwm_request = 0;
+  else if (throttle_request > 99.5) pwm_request = 255;
+
+  return pwm_request;
 }
 
